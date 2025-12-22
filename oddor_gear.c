@@ -1,0 +1,410 @@
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/usb.h>
+#include <linux/hid.h>
+#include <linux/input.h>
+#include <linux/slab.h>
+#include <linux/mutex.h>
+
+#define DRIVER_AUTHOR "ODDOR-GEAR Driver"
+#define DRIVER_DESC "ZSC ODDOR-GEAR USB Shifter Driver"
+#define DRIVER_LICENSE "GPL"
+
+// ZSC ODDOR-GEAR specific VID/PID
+#define ODDOR_GEAR_VENDOR_ID  0x4785
+#define ODDOR_GEAR_PRODUCT_ID 0x7353
+
+// Gear position codes
+#define GEAR_NEUTRAL   0x00
+#define GEAR_1         0x01
+#define GEAR_2         0x02
+#define GEAR_3         0x04
+#define GEAR_4         0x08
+#define GEAR_5         0x10
+#define GEAR_6         0x20
+#define GEAR_7         0x40
+#define GEAR_R         0x80
+
+// Button mappings for joystick
+#define BTN_GEAR_1     BTN_TRIGGER_HAPPY1
+#define BTN_GEAR_2     BTN_TRIGGER_HAPPY2
+#define BTN_GEAR_3     BTN_TRIGGER_HAPPY3
+#define BTN_GEAR_4     BTN_TRIGGER_HAPPY4
+#define BTN_GEAR_5     BTN_TRIGGER_HAPPY5
+#define BTN_GEAR_6     BTN_TRIGGER_HAPPY6
+#define BTN_GEAR_7     BTN_TRIGGER_HAPPY7
+#define BTN_GEAR_R     BTN_TRIGGER_HAPPY8
+
+// Input device name
+#define DEVICE_NAME    "ZSC ODDOR-GEAR Shifter"
+
+// Gear to button mapping lookup table
+static const struct {
+    unsigned char gear_code;
+    unsigned int button_code;
+} gear_button_map[] = {
+    { GEAR_1, BTN_GEAR_1 },
+    { GEAR_2, BTN_GEAR_2 },
+    { GEAR_3, BTN_GEAR_3 },
+    { GEAR_4, BTN_GEAR_4 },
+    { GEAR_5, BTN_GEAR_5 },
+    { GEAR_6, BTN_GEAR_6 },
+    { GEAR_7, BTN_GEAR_7 },
+    { GEAR_R, BTN_GEAR_R },
+};
+
+struct oddor_gear {
+    struct usb_device *udev;
+    struct usb_interface *interface;
+    struct input_dev *input;
+    unsigned char *data;
+    dma_addr_t data_dma;
+    struct urb *irq_urb;
+    struct mutex io_mutex;
+    int open_count;
+    unsigned char current_gear;
+    int buffer_size;
+    bool device_removed; // Flag to handle early device removal gracefully
+};
+
+static const struct usb_device_id oddor_gear_table[] = {
+    { USB_DEVICE(ODDOR_GEAR_VENDOR_ID, ODDOR_GEAR_PRODUCT_ID) },
+    { } /* Terminating entry */
+};
+MODULE_DEVICE_TABLE(usb, oddor_gear_table);
+
+static void oddor_gear_irq(struct urb *urb)
+{
+    struct oddor_gear *shifter = urb->context;
+    int retval;
+    unsigned char *data;
+    unsigned char new_gear;
+    int map_size = sizeof(gear_button_map) / sizeof(gear_button_map[0]);
+
+    if (!shifter || shifter->device_removed) {
+        return;
+    }
+
+    switch (urb->status) {
+        case 0:            /* success */
+            break;
+        case -ECONNRESET:  /* unlink */
+        case -ENOENT:
+        case -ESHUTDOWN:
+            return;
+        default:
+            goto resubmit;
+    }
+
+    if (!shifter || !shifter->input || !shifter->input->users) {
+        goto resubmit;
+    }
+
+    data = shifter->data;
+    new_gear = data[0];  // Gear position is in byte 0
+
+    if (!data || urb->actual_length < 1) {
+        dev_warn(&shifter->interface->dev, "Malformed packet received (length: %d)\n",
+                urb->actual_length);
+        goto resubmit;
+    }
+
+    // Only process if gear changed
+    if (new_gear != shifter->current_gear) {
+        mutex_lock(&shifter->io_mutex);
+        
+        // Release previous gear
+        int prev_button = -1;
+        for (int i = 0; i < map_size; i++) {
+            if (shifter->current_gear == gear_button_map[i].gear_code) {
+                prev_button = gear_button_map[i].button_code;
+                break;
+            }
+        }
+        if (prev_button != -1) {
+            input_report_key(shifter->input, prev_button, 0);
+        } else {
+            // If previous gear was unknown, release all to be safe
+            for (int i = 0; i < map_size; i++) {
+                input_report_key(shifter->input, gear_button_map[i].button_code, 0);
+            }
+        }
+        
+        // Press new gear
+        switch (new_gear) {
+            case GEAR_1 ... GEAR_R:
+                // Proper input handling
+                int new_button = -1;
+                for (int i = 0; i < map_size; i++) {
+                    if (new_gear == gear_button_map[i].gear_code) {
+                        new_button = gear_button_map[i].button_code;
+                        break;
+                    }
+                }
+                if (new_button != -1) {
+                    input_report_key(shifter->input, new_button, 1);
+                    // Print appropriate message based on gear
+                    switch (new_gear) {
+                        case GEAR_1:
+                            printk(KERN_INFO "ODDOR-GEAR: Gear 1 engaged (0x%02X)\n", new_gear);
+                            break;
+                        case GEAR_2:
+                            printk(KERN_INFO "ODDOR-GEAR: Gear 2 engaged (0x%02X)\n", new_gear);
+                            break;
+                        case GEAR_3:
+                            printk(KERN_INFO "ODDOR-GEAR: Gear 3 engaged (0x%02X)\n", new_gear);
+                            break;
+                        case GEAR_4:
+                            printk(KERN_INFO "ODDOR-GEAR: Gear 4 engaged (0x%02X)\n", new_gear);
+                            break;
+                        case GEAR_5:
+                            printk(KERN_INFO "ODDOR-GEAR: Gear 5 engaged (0x%02X)\n", new_gear);
+                            break;
+                        case GEAR_6:
+                            printk(KERN_INFO "ODDOR-GEAR: Gear 6 engaged (0x%02X)\n", new_gear);
+                            break;
+                        case GEAR_7:
+                            printk(KERN_INFO "ODDOR-GEAR: Gear 7 engaged (0x%02X)\n", new_gear);
+                            break;
+                        case GEAR_R:
+                            printk(KERN_INFO "ODDOR-GEAR: Reverse gear engaged (0x%02X)\n", new_gear);
+                            break;
+                        case GEAR_NEUTRAL:
+                            printk(KERN_INFO "ODDOR-GEAR: Neutral (0x%02X)\n", new_gear);
+                            break;
+                    }
+                }
+                break;
+            default:
+                // For unknown codes, just log it without spamming
+                break;
+        }
+        
+        shifter->current_gear = new_gear;
+        // Prevent race on input_sync with possible concurrent close
+        if (shifter->input && shifter->input->users) {
+            input_sync(shifter->input);
+        }
+        mutex_unlock(&shifter->io_mutex);
+    }
+
+resubmit:
+    retval = usb_submit_urb(urb, GFP_ATOMIC);
+    if (retval) {
+        dev_err(&shifter->interface->dev,
+                "%s - usb_submit_urb failed with result %d\n",
+                __func__, retval);
+    }
+}
+
+static int oddor_gear_open(struct input_dev *dev)
+{
+    struct oddor_gear *shifter = input_get_drvdata(dev);
+    int retval;
+
+    mutex_lock(&shifter->io_mutex);
+    
+    if (shifter->device_removed) {
+        mutex_unlock(&shifter->io_mutex);
+        return -ENODEV;
+    }
+
+    if (shifter->open_count++ == 0) {
+        shifter->irq_urb->dev = shifter->udev;
+        retval = usb_submit_urb(shifter->irq_urb, GFP_KERNEL);
+        if (retval) {
+            shifter->open_count--;
+            mutex_unlock(&shifter->io_mutex);
+            return retval;
+        }
+    }
+    
+    mutex_unlock(&shifter->io_mutex);
+    return 0;
+}
+
+static void oddor_gear_close(struct input_dev *dev)
+{
+    struct oddor_gear *shifter = input_get_drvdata(dev);
+
+    mutex_lock(&shifter->io_mutex);
+    
+    if (--shifter->open_count == 0) {
+        usb_kill_urb(shifter->irq_urb);
+    }
+    
+    mutex_unlock(&shifter->io_mutex);
+}
+
+static int oddor_gear_probe(struct usb_interface *interface,
+                           const struct usb_device_id *id)
+{
+    struct usb_device *udev = interface_to_usbdev(interface);
+    struct oddor_gear *shifter;
+    struct usb_endpoint_descriptor *endpoint;
+    struct usb_host_interface *iface_desc;
+    struct input_dev *input_dev;
+    int i, pipe, maxp, error = -ENOMEM;
+
+    shifter = kzalloc(sizeof(struct oddor_gear), GFP_KERNEL);
+    if (!shifter)
+        return -ENOMEM;
+
+    shifter->udev = usb_get_dev(udev);
+    shifter->interface = interface;
+    mutex_init(&shifter->io_mutex);
+    shifter->current_gear = GEAR_NEUTRAL;
+    shifter->buffer_size = 0;
+    shifter->device_removed = false;
+
+    // Find interrupt endpoint
+    iface_desc = interface->cur_altsetting;
+    if (!iface_desc) {
+        error = -ENODEV;
+        goto err_free_shifter;
+    }
+    for (i = 0; i < iface_desc->desc.bNumEndpoints; i++) {
+        endpoint = &iface_desc->endpoint[i].desc;
+        if (usb_endpoint_is_int_in(endpoint)) {
+            pipe = usb_rcvintpipe(udev, endpoint->bEndpointAddress);
+            maxp = usb_maxpacket(udev, pipe);
+            break;
+        }
+    }
+
+    if (i == iface_desc->desc.bNumEndpoints) {
+        dev_err(&interface->dev, "No interrupt endpoint found\n");
+        error = -ENODEV;
+        goto err_free_shifter;
+    }
+
+    // Allocate data buffer for USB transfers
+    shifter->data = usb_alloc_coherent(udev, maxp, GFP_KERNEL,
+                                      &shifter->data_dma);
+    if (!shifter->data) {
+        error = -ENOMEM;
+        goto err_free_shifter;
+    }
+    shifter->buffer_size = maxp;
+
+    // Allocate URB
+    shifter->irq_urb = usb_alloc_urb(0, GFP_KERNEL);
+    if (!shifter->irq_urb) {
+        error = -ENOMEM;
+        goto err_free_buffer;
+    }
+
+    usb_fill_int_urb(shifter->irq_urb, udev, pipe,
+                    shifter->data, maxp,
+                    oddor_gear_irq, shifter,
+                    endpoint->bInterval);
+    shifter->irq_urb->transfer_dma = shifter->data_dma;
+    shifter->irq_urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
+
+    // Create input device
+    input_dev = input_allocate_device();
+    if (!input_dev) {
+        error = -ENOMEM;
+        goto err_free_urb;
+    }
+
+    shifter->input = input_dev;
+    input_dev->name = DEVICE_NAME;
+    input_dev->phys = "usb/oddor-gear";
+    input_dev->id.bustype = BUS_USB;
+    input_dev->id.vendor = ODDOR_GEAR_VENDOR_ID;
+    input_dev->id.product = ODDOR_GEAR_PRODUCT_ID;
+    input_dev->id.version = 0x0100;
+    input_dev->dev.parent = &interface->dev;
+
+    // Set up as a button device only (no EV_ABS since we don't have axes)
+    __set_bit(EV_KEY, input_dev->evbit);
+    
+    // Clear any potentially invalid button assignments
+    for (int j = 0; j < KEY_MAX; j++) {
+        if (test_bit(j, input_dev->keybit)) {
+            __clear_bit(j, input_dev->keybit);
+        }
+    }
+
+    // Set up gear buttons using lookup table
+    int map_size = sizeof(gear_button_map) / sizeof(gear_button_map[0]);
+    for (int i = 0; i < map_size; i++) {
+        __set_bit(gear_button_map[i].button_code, input_dev->keybit);
+    }
+
+    input_dev->open = oddor_gear_open;
+    input_dev->close = oddor_gear_close;
+
+    input_set_drvdata(input_dev, shifter);
+    usb_set_intfdata(interface, shifter);
+
+    error = input_register_device(input_dev);
+    if (error) {
+        dev_err(&interface->dev,
+                "Failed to register input device: %d\n", error);
+        goto err_free_input;
+    }
+
+    dev_info(&interface->dev,
+             "ZSC ODDOR-GEAR H-pattern shifter connected as joystick\n");
+
+    return 0;
+
+err_free_input:
+    input_free_device(input_dev);
+err_free_urb:
+    usb_free_urb(shifter->irq_urb);
+err_free_buffer:
+    usb_free_coherent(udev, maxp, shifter->data, shifter->data_dma);
+err_free_shifter:
+    kfree(shifter);
+    return error;
+}
+
+static void oddor_gear_disconnect(struct usb_interface *interface)
+{
+    struct oddor_gear *shifter = usb_get_intfdata(interface);
+
+    if (!shifter) {
+        return;
+    }
+
+    usb_set_intfdata(interface, NULL);
+    
+    shifter->device_removed = true;
+
+    if (shifter) {
+        if (shifter->input) {
+            input_unregister_device(shifter->input);
+        }
+        
+        usb_kill_urb(shifter->irq_urb);
+        usb_free_urb(shifter->irq_urb);
+        
+        if (shifter->data) {
+            usb_free_coherent(shifter->udev, shifter->buffer_size,
+                            shifter->data, shifter->data_dma);
+        }
+        
+        usb_put_dev(shifter->udev);
+        mutex_destroy(&shifter->io_mutex);
+        kfree(shifter);
+    }
+    
+    dev_info(&interface->dev, "ZSC ODDOR-GEAR disconnected\n");
+}
+
+static struct usb_driver oddor_gear_driver = {
+    .name = "oddor_gear",
+    .probe = oddor_gear_probe,
+    .disconnect = oddor_gear_disconnect,
+    .id_table = oddor_gear_table,
+    .supports_autosuspend = 1,
+};
+
+module_usb_driver(oddor_gear_driver);
+
+MODULE_AUTHOR(DRIVER_AUTHOR);
+MODULE_DESCRIPTION(DRIVER_DESC);
+MODULE_LICENSE(DRIVER_LICENSE);
