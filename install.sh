@@ -35,7 +35,7 @@ $SUDO_CMD dkms add -m ${PACKAGE} -v ${VERSION}
 
 # Build module with verbose output
 echo "Building module..."
-$SUDO_CMD dkms build -m ${PACKAGE} -v ${VERSION} -k $(uname -r) --verbose
+$SUDO_CMD dkms build -m ${PACKAGE} -v ${VERSION} --verbose
 
 # Install module
 echo "Installing module..."
