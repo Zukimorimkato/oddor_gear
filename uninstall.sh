@@ -1,4 +1,7 @@
 #!/bin/bash
+
+set -e
+
 VERSION="1.0"
 PACKAGE="oddor-gear"
 
