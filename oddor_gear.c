@@ -42,16 +42,19 @@
 static const struct {
     unsigned char gear_code;
     unsigned int button_code;
+    const char *name;
 } gear_button_map[] = {
-    { GEAR_1, BTN_GEAR_1 },
-    { GEAR_2, BTN_GEAR_2 },
-    { GEAR_3, BTN_GEAR_3 },
-    { GEAR_4, BTN_GEAR_4 },
-    { GEAR_5, BTN_GEAR_5 },
-    { GEAR_6, BTN_GEAR_6 },
-    { GEAR_7, BTN_GEAR_7 },
-    { GEAR_R, BTN_GEAR_R },
+    { GEAR_1, BTN_GEAR_1, "Gear 1" },
+    { GEAR_2, BTN_GEAR_2, "Gear 2" },
+    { GEAR_3, BTN_GEAR_3, "Gear 3" },
+    { GEAR_4, BTN_GEAR_4, "Gear 4" },
+    { GEAR_5, BTN_GEAR_5, "Gear 5" },
+    { GEAR_6, BTN_GEAR_6, "Gear 6" },
+    { GEAR_7, BTN_GEAR_7, "Gear 7" },
+    { GEAR_R, BTN_GEAR_R, "Reverse" },
 };
+
+#define GEAR_MAP_SIZE ARRAY_SIZE(gear_button_map)
 
 struct oddor_gear {
     struct usb_device *udev;
@@ -77,9 +80,8 @@ static void oddor_gear_irq(struct urb *urb)
 {
     struct oddor_gear *shifter = urb->context;
     int retval;
-    unsigned char *data;
     unsigned char new_gear;
-    int map_size = sizeof(gear_button_map) / sizeof(gear_button_map[0]);
+    int i;
 
     if (!shifter || shifter->device_removed) {
         return;
@@ -96,26 +98,25 @@ static void oddor_gear_irq(struct urb *urb)
             goto resubmit;
     }
 
-    if (!shifter || !shifter->input || !shifter->input->users) {
+    if (!shifter->input || !shifter->input->users) {
         goto resubmit;
     }
 
-    data = shifter->data;
-    new_gear = data[0];  // Gear position is in byte 0
-
-    if (!data || urb->actual_length < 1) {
+    if (!shifter->data || urb->actual_length < 1) {
         dev_warn(&shifter->interface->dev, "Malformed packet received (length: %d)\n",
                 urb->actual_length);
         goto resubmit;
     }
 
+    new_gear = shifter->data[0];  // Gear position is in byte 0
+
     // Only process if gear changed
     if (new_gear != shifter->current_gear) {
         mutex_lock(&shifter->io_mutex);
-        
+
         // Release previous gear
         int prev_button = -1;
-        for (int i = 0; i < map_size; i++) {
+        for (i = 0; i < GEAR_MAP_SIZE; i++) {
             if (shifter->current_gear == gear_button_map[i].gear_code) {
                 prev_button = gear_button_map[i].button_code;
                 break;
@@ -125,61 +126,27 @@ static void oddor_gear_irq(struct urb *urb)
             input_report_key(shifter->input, prev_button, 0);
         } else {
             // If previous gear was unknown, release all to be safe
-            for (int i = 0; i < map_size; i++) {
+            for (i = 0; i < GEAR_MAP_SIZE; i++) {
                 input_report_key(shifter->input, gear_button_map[i].button_code, 0);
             }
         }
-        
+
         // Press new gear
-        switch (new_gear) {
-            case GEAR_1 ... GEAR_R:
-                // Proper input handling
-                int new_button = -1;
-                for (int i = 0; i < map_size; i++) {
-                    if (new_gear == gear_button_map[i].gear_code) {
-                        new_button = gear_button_map[i].button_code;
-                        break;
-                    }
-                }
-                if (new_button != -1) {
-                    input_report_key(shifter->input, new_button, 1);
-                    // Print appropriate message based on gear
-                    switch (new_gear) {
-                        case GEAR_1:
-                            printk(KERN_INFO "ODDOR-GEAR: Gear 1 engaged (0x%02X)\n", new_gear);
-                            break;
-                        case GEAR_2:
-                            printk(KERN_INFO "ODDOR-GEAR: Gear 2 engaged (0x%02X)\n", new_gear);
-                            break;
-                        case GEAR_3:
-                            printk(KERN_INFO "ODDOR-GEAR: Gear 3 engaged (0x%02X)\n", new_gear);
-                            break;
-                        case GEAR_4:
-                            printk(KERN_INFO "ODDOR-GEAR: Gear 4 engaged (0x%02X)\n", new_gear);
-                            break;
-                        case GEAR_5:
-                            printk(KERN_INFO "ODDOR-GEAR: Gear 5 engaged (0x%02X)\n", new_gear);
-                            break;
-                        case GEAR_6:
-                            printk(KERN_INFO "ODDOR-GEAR: Gear 6 engaged (0x%02X)\n", new_gear);
-                            break;
-                        case GEAR_7:
-                            printk(KERN_INFO "ODDOR-GEAR: Gear 7 engaged (0x%02X)\n", new_gear);
-                            break;
-                        case GEAR_R:
-                            printk(KERN_INFO "ODDOR-GEAR: Reverse gear engaged (0x%02X)\n", new_gear);
-                            break;
-                        case GEAR_NEUTRAL:
-                            printk(KERN_INFO "ODDOR-GEAR: Neutral (0x%02X)\n", new_gear);
-                            break;
-                    }
-                }
+        int new_button = -1;
+        for (i = 0; i < GEAR_MAP_SIZE; i++) {
+            if (new_gear == gear_button_map[i].gear_code) {
+                new_button = gear_button_map[i].button_code;
+                pr_info("ODDOR-GEAR: %s engaged (0x%02X)\n",
+                        gear_button_map[i].name, new_gear);
                 break;
-            default:
-                // For unknown codes, just log it without spamming
-                break;
+            }
         }
-        
+        if (new_button != -1) {
+            input_report_key(shifter->input, new_button, 1);
+        } else if (new_gear == GEAR_NEUTRAL) {
+            pr_info("ODDOR-GEAR: Neutral (0x%02X)\n", new_gear);
+        }
+
         shifter->current_gear = new_gear;
         // Prevent race on input_sync with possible concurrent close
         if (shifter->input && shifter->input->users) {
@@ -203,7 +170,7 @@ static int oddor_gear_open(struct input_dev *dev)
     int retval;
 
     mutex_lock(&shifter->io_mutex);
-    
+
     if (shifter->device_removed) {
         mutex_unlock(&shifter->io_mutex);
         return -ENODEV;
@@ -218,7 +185,7 @@ static int oddor_gear_open(struct input_dev *dev)
             return retval;
         }
     }
-    
+
     mutex_unlock(&shifter->io_mutex);
     return 0;
 }
@@ -228,11 +195,11 @@ static void oddor_gear_close(struct input_dev *dev)
     struct oddor_gear *shifter = input_get_drvdata(dev);
 
     mutex_lock(&shifter->io_mutex);
-    
+
     if (--shifter->open_count == 0) {
         usb_kill_urb(shifter->irq_urb);
     }
-    
+
     mutex_unlock(&shifter->io_mutex);
 }
 
@@ -244,6 +211,7 @@ static int oddor_gear_probe(struct usb_interface *interface,
     struct usb_endpoint_descriptor *endpoint;
     struct usb_host_interface *iface_desc;
     struct input_dev *input_dev;
+    char phys[64];
     int i, pipe, maxp, error = -ENOMEM;
 
     shifter = kzalloc(sizeof(struct oddor_gear), GFP_KERNEL);
@@ -310,7 +278,9 @@ static int oddor_gear_probe(struct usb_interface *interface,
 
     shifter->input = input_dev;
     input_dev->name = DEVICE_NAME;
-    input_dev->phys = "usb/oddor-gear";
+    usb_make_path(udev, phys, sizeof(phys));
+    strlcat(phys, "/input0", sizeof(phys));
+    input_dev->phys = phys;
     input_dev->id.bustype = BUS_USB;
     input_dev->id.vendor = ODDOR_GEAR_VENDOR_ID;
     input_dev->id.product = ODDOR_GEAR_PRODUCT_ID;
@@ -319,17 +289,9 @@ static int oddor_gear_probe(struct usb_interface *interface,
 
     // Set up as a button device only (no EV_ABS since we don't have axes)
     __set_bit(EV_KEY, input_dev->evbit);
-    
-    // Clear any potentially invalid button assignments
-    for (int j = 0; j < KEY_MAX; j++) {
-        if (test_bit(j, input_dev->keybit)) {
-            __clear_bit(j, input_dev->keybit);
-        }
-    }
 
     // Set up gear buttons using lookup table
-    int map_size = sizeof(gear_button_map) / sizeof(gear_button_map[0]);
-    for (int i = 0; i < map_size; i++) {
+    for (i = 0; i < GEAR_MAP_SIZE; i++) {
         __set_bit(gear_button_map[i].button_code, input_dev->keybit);
     }
 
@@ -371,28 +333,26 @@ static void oddor_gear_disconnect(struct usb_interface *interface)
     }
 
     usb_set_intfdata(interface, NULL);
-    
+
     shifter->device_removed = true;
 
-    if (shifter) {
-        if (shifter->input) {
-            input_unregister_device(shifter->input);
-        }
-        
-        usb_kill_urb(shifter->irq_urb);
-        usb_free_urb(shifter->irq_urb);
-        
-        if (shifter->data) {
-            usb_free_coherent(shifter->udev, shifter->buffer_size,
-                            shifter->data, shifter->data_dma);
-        }
-        
-        usb_put_dev(shifter->udev);
-        mutex_destroy(&shifter->io_mutex);
-        kfree(shifter);
+    if (shifter->input) {
+        input_unregister_device(shifter->input);
     }
-    
+
+    usb_kill_urb(shifter->irq_urb);
+    usb_free_urb(shifter->irq_urb);
+
+    if (shifter->data) {
+        usb_free_coherent(shifter->udev, shifter->buffer_size,
+                        shifter->data, shifter->data_dma);
+    }
+
     dev_info(&interface->dev, "ZSC ODDOR-GEAR disconnected\n");
+
+    usb_put_dev(shifter->udev);
+    mutex_destroy(&shifter->io_mutex);
+    kfree(shifter);
 }
 
 static struct usb_driver oddor_gear_driver = {
