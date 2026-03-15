@@ -1,17 +1,9 @@
 #!/bin/bash
-
-set -e
-
 VERSION="1.0"
 MODULE="oddor_gear"
 PACKAGE="oddor-gear"
 
 echo "Installing ZSC ODDOR-GEAR DKMS module..."
-
-# Check if all needed tools are installed
-for cmd in dkms make gcc; do
-    command -v "$cmd" &>/dev/null || { echo "ERROR: $cmd not found. Install it first."; exit 1; }
-done
 
 # Check if running as root, if not use sudo
 if [ "$EUID" -ne 0 ]; then
