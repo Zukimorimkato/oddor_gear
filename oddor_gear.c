@@ -1,7 +1,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/usb.h>
-#include <linux/hid.h>
 #include <linux/input.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
@@ -83,8 +82,10 @@ static void oddor_gear_irq(struct urb *urb)
     int retval;
     unsigned char new_gear;
     int i;
+    int prev_button;
+    int new_button;
 
-    if (!shifter || shifter->device_removed) {
+    if (!shifter || READ_ONCE(shifter->device_removed)) {
         return;
     }
 
@@ -109,14 +110,13 @@ static void oddor_gear_irq(struct urb *urb)
         goto resubmit;
     }
 
-    new_gear = shifter->data[0];  // Gear position is in byte 0
+    new_gear = shifter->data[0];  /* Gear position is in byte 0 */
 
-    // Only process if gear changed
+    /* Only process if gear changed */
     if (new_gear != shifter->current_gear) {
         mutex_lock(&shifter->io_mutex);
-
-        // Release previous gear
-        int prev_button = -1;
+        /* Release previous gear */
+        prev_button = -1;
         for (i = 0; i < GEAR_MAP_SIZE; i++) {
             if (shifter->current_gear == gear_button_map[i].gear_code) {
                 prev_button = gear_button_map[i].button_code;
@@ -126,14 +126,14 @@ static void oddor_gear_irq(struct urb *urb)
         if (prev_button != -1) {
             input_report_key(shifter->input, prev_button, 0);
         } else {
-            // If previous gear was unknown, release all to be safe
+            /* If previous gear was unknown, release all to be safe */
             for (i = 0; i < GEAR_MAP_SIZE; i++) {
                 input_report_key(shifter->input, gear_button_map[i].button_code, 0);
             }
         }
 
-        // Press new gear
-        int new_button = -1;
+        /* Press new gear */
+        new_button = -1;
         for (i = 0; i < GEAR_MAP_SIZE; i++) {
             if (new_gear == gear_button_map[i].gear_code) {
                 new_button = gear_button_map[i].button_code;
@@ -149,10 +149,7 @@ static void oddor_gear_irq(struct urb *urb)
         }
 
         shifter->current_gear = new_gear;
-        // Prevent race on input_sync with possible concurrent close
-        if (shifter->input && shifter->input->users) {
-            input_sync(shifter->input);
-        }
+        input_sync(shifter->input);
         mutex_unlock(&shifter->io_mutex);
     }
 
@@ -334,13 +331,16 @@ static void oddor_gear_disconnect(struct usb_interface *interface)
 
     usb_set_intfdata(interface, NULL);
 
-    shifter->device_removed = true;
-
-    if (shifter->input) {
-        input_unregister_device(shifter->input);
-    }
+    WRITE_ONCE(shifter->device_removed, true);
 
     usb_kill_urb(shifter->irq_urb);
+
+    if (shifter->input) {
+        mutex_lock(&shifter->io_mutex);
+        input_unregister_device(shifter->input);
+        mutex_unlock(&shifter->io_mutex);
+    }
+
     usb_free_urb(shifter->irq_urb);
 
     if (shifter->data) {
