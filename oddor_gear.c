@@ -114,6 +114,7 @@ static void oddor_gear_irq(struct urb *urb)
 
     /* Only process if gear changed */
     if (new_gear != shifter->current_gear) {
+        mutex_lock(&shifter->io_mutex);
         /* Release previous gear */
         prev_button = -1;
         for (i = 0; i < GEAR_MAP_SIZE; i++) {
@@ -149,6 +150,7 @@ static void oddor_gear_irq(struct urb *urb)
 
         shifter->current_gear = new_gear;
         input_sync(shifter->input);
+        mutex_unlock(&shifter->io_mutex);
     }
 
 resubmit:
@@ -333,8 +335,11 @@ static void oddor_gear_disconnect(struct usb_interface *interface)
 
     usb_kill_urb(shifter->irq_urb);
 
-    if (shifter->input)
+    if (shifter->input) {
+        mutex_lock(&shifter->io_mutex);
         input_unregister_device(shifter->input);
+        mutex_unlock(&shifter->io_mutex);
+    }
 
     usb_free_urb(shifter->irq_urb);
 
