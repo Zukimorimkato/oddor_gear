@@ -1,5 +1,7 @@
 #!/bin/bash
-VERSION="1.0"
+set -e
+
+source "$(dirname "$0")/version.sh"
 MODULE="oddor_gear"
 PACKAGE="oddor-gear"
 
@@ -13,6 +15,20 @@ else
     SUDO_CMD=""
 fi
 
+# Check for required tools
+for cmd in dkms make gcc; do
+    command -v "$cmd" &>/dev/null || {
+        echo "ERROR: '$cmd' not found. Install it first (e.g. sudo apt install $cmd)."
+        exit 1
+    }
+done
+
+# Show detected USB devices to help user confirm VID/PID
+echo ""
+echo "Detected USB devices (confirm your shifter is listed as 4785:7353):"
+lsusb | grep "4785:7353" && echo "  -> Shifter found!" || echo "  -> Shifter NOT detected. Check USB connection or update VID/PID in oddor_gear.c"
+echo ""
+
 # Check if already installed and remove if so
 if $SUDO_CMD dkms status | grep -q "$PACKAGE/$VERSION"; then
     echo "Found existing installation, removing first..."
@@ -25,9 +41,6 @@ $SUDO_CMD mkdir -p /usr/src/${PACKAGE}-${VERSION}
 
 # Copy source files
 $SUDO_CMD cp dkms.conf Makefile oddor_gear.c /usr/src/${PACKAGE}-${VERSION}/
-
-# Make sure Makefile is executable
-$SUDO_CMD chmod +x /usr/src/${PACKAGE}-${VERSION}/Makefile
 
 # Add to DKMS
 echo "Adding module to DKMS..."
@@ -64,3 +77,4 @@ $SUDO_CMD dkms status | grep oddor || echo "Not found in DKMS"
 echo ""
 echo "Installation complete!"
 echo "The shifter should now work with games that accept joystick input for gears."
+echo "If it stops working after a kernel update, run: sudo dkms autoinstall"

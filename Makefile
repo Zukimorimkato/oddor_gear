@@ -2,10 +2,14 @@ obj-m := oddor_gear.o
 
 KVERSION := $(shell uname -r)
 KERNEL_SRC := /lib/modules/$(KVERSION)/build
-PWD := $(shell pwd)
+SRC_DIR := $(shell pwd)
 
 all:
-	$(MAKE) -C $(KERNEL_SRC) M=$(PWD) modules
+	@test -d $(KERNEL_SRC) || \
+		(echo "ERROR: Kernel headers not found at $(KERNEL_SRC)."; \
+		 echo "       Install with: sudo apt install linux-headers-$(KVERSION)"; \
+		 exit 1)
+	$(MAKE) -C $(KERNEL_SRC) M=$(SRC_DIR) modules
 
 clean:
 	rm -f *.o *.ko *.mod.o *.mod.c *.symvers *.order
@@ -13,3 +17,13 @@ clean:
 
 clean-dkms:
 	$(MAKE) clean
+
+help:
+	@echo "Targets:"
+	@echo "  all        - Build the kernel module (requires kernel headers)"
+	@echo "  clean      - Remove build artifacts"
+	@echo "  clean-dkms - Alias for clean (called by DKMS)"
+	@echo "  help       - Show this message"
+	@echo ""
+	@echo "Kernel: $(KVERSION)"
+	@echo "Headers: $(KERNEL_SRC)"

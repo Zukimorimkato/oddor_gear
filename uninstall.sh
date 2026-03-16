@@ -1,6 +1,9 @@
 #!/bin/bash
-VERSION="1.0"
+set -e
+
+source "$(dirname "$0")/version.sh"
 PACKAGE="oddor-gear"
+MODULE="oddor_gear"
 
 echo "Removing ZSC ODDOR-GEAR DKMS module..."
 
@@ -11,6 +14,10 @@ if [ "$EUID" -ne 0 ]; then
 else
     SUDO_CMD=""
 fi
+
+# Unload module first before DKMS tears it down
+echo "Unloading module..."
+$SUDO_CMD modprobe -r $MODULE 2>/dev/null || true
 
 # Remove from DKMS
 $SUDO_CMD dkms remove -m ${PACKAGE} -v ${VERSION} --all
@@ -23,8 +30,6 @@ $SUDO_CMD rm -f /etc/udev/rules.d/99-oddor-gear.rules
 
 # Reload udev
 $SUDO_CMD udevadm control --reload-rules
-
-# Try to unload module if loaded
-$SUDO_CMD modprobe -r oddor_gear 2>/dev/null || true
+$SUDO_CMD udevadm trigger
 
 echo "Uninstall complete!"
