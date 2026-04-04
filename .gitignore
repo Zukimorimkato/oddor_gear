@@ -7,3 +7,4 @@
 *.symvers
 compile_commands.json
 .*.cmd
+.clangd
