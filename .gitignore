@@ -1,0 +1,9 @@
+# Kernel module build artifacts
+*.ko
+*.o
+*.mod
+*.mod.c
+*.order
+*.symvers
+compile_commands.json
+.*.cmd
