@@ -118,6 +118,12 @@ For raw kernel logs:
 dmesg | grep -i oddor | tail -20
 ```
 
+Per-gear messages ("Gear 3 engaged", ...) are debug-level so they don't flood
+the kernel log while driving. To see them, enable dynamic debug:
+```bash
+echo 'module oddor_gear +p' | sudo tee /sys/kernel/debug/dynamic_debug/control
+```
+
 ---
 
 ## Uninstallation

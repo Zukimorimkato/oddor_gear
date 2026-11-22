@@ -1,6 +1,6 @@
 obj-m := oddor_gear.o
 
-KVERSION := $(shell uname -r)
+KVERSION ?= $(shell uname -r)
 KERNEL_SRC := /lib/modules/$(KVERSION)/build
 SRC_DIR := $(shell pwd)
 
