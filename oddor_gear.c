@@ -37,6 +37,16 @@
 // Input device name
 #define DEVICE_NAME    "ZSC ODDOR-GEAR Shifter"
 
+// HID class GET_REPORT request, used to read the current gear on open/resume
+#define ODDOR_HID_REQ_GET_REPORT   0x01
+#define ODDOR_HID_INPUT_REPORT     0x01
+#define ODDOR_SYNC_TIMEOUT_MS      250
+
+static bool sync_on_open = true;
+module_param(sync_on_open, bool, 0644);
+MODULE_PARM_DESC(sync_on_open,
+                 "Read the current gear from the device on open/resume (default: Y)");
+
 // Gear to button mapping lookup table
 static const struct {
     unsigned char gear_code;
@@ -95,6 +105,87 @@ static int oddor_gear_lookup(unsigned char gear)
 }
 
 /*
+ * Translate a gear code into button events. Called from the URB completion
+ * handler, or from process context while the URB is known not to be running
+ * (open/close/resume), so current_gear never has two writers at once.
+ * Safe in atomic context.
+ */
+static void oddor_gear_report_gear(struct oddor_gear *shifter,
+                                   unsigned char new_gear)
+{
+    struct device *dev = &shifter->interface->dev;
+    unsigned int i;
+    int prev_idx, new_idx;
+
+    /* Only process if gear changed */
+    if (new_gear == shifter->current_gear)
+        return;
+
+    /* Release previous gear */
+    prev_idx = oddor_gear_lookup(shifter->current_gear);
+    if (prev_idx >= 0) {
+        input_report_key(shifter->input,
+                         gear_button_map[prev_idx].button_code, 0);
+    } else {
+        /* If previous gear was unknown, release all to be safe */
+        for (i = 0; i < GEAR_MAP_SIZE; i++)
+            input_report_key(shifter->input,
+                             gear_button_map[i].button_code, 0);
+    }
+
+    /* Press new gear */
+    new_idx = oddor_gear_lookup(new_gear);
+    if (new_idx >= 0) {
+        input_report_key(shifter->input,
+                         gear_button_map[new_idx].button_code, 1);
+        dev_dbg(dev, "%s engaged (0x%02X)\n",
+                gear_button_map[new_idx].name, new_gear);
+    } else if (new_gear == GEAR_NEUTRAL) {
+        dev_dbg(dev, "Neutral (0x%02X)\n", new_gear);
+    } else {
+        dev_dbg(dev, "Unknown gear code 0x%02X\n", new_gear);
+    }
+
+    shifter->current_gear = new_gear;
+    input_sync(shifter->input);
+}
+
+/*
+ * Ask the device for its current state with a HID GET_REPORT request, so
+ * that a gear engaged while nobody had the device open (or while the system
+ * slept) is reported right away instead of only after the next shift.
+ * Best effort: any failure is ignored and we fall back to waiting for the
+ * next interrupt report. Process context only; the URB must not be running.
+ */
+static void oddor_gear_sync_state(struct oddor_gear *shifter)
+{
+    struct usb_host_interface *alt = shifter->interface->cur_altsetting;
+    unsigned char *buf;
+    int ret;
+
+    if (!sync_on_open || alt->desc.bInterfaceClass != USB_CLASS_HID)
+        return;
+
+    buf = kmalloc(shifter->buffer_size, GFP_NOIO);
+    if (!buf)
+        return;
+
+    ret = usb_control_msg(shifter->udev, usb_rcvctrlpipe(shifter->udev, 0),
+                          ODDOR_HID_REQ_GET_REPORT,
+                          USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+                          ODDOR_HID_INPUT_REPORT << 8,
+                          alt->desc.bInterfaceNumber,
+                          buf, shifter->buffer_size, ODDOR_SYNC_TIMEOUT_MS);
+    if (ret >= 1)
+        oddor_gear_report_gear(shifter, buf[0]);
+    else
+        dev_dbg(&shifter->interface->dev,
+                "GET_REPORT not supported (%d), waiting for next report\n", ret);
+
+    kfree(buf);
+}
+
+/*
  * URB completion handler. Runs in atomic (interrupt / BH) context, so it
  * must not sleep: no mutexes, GFP_ATOMIC only. The input core's
  * input_report_key()/input_sync() are safe to call from here.
@@ -103,9 +194,6 @@ static void oddor_gear_irq(struct urb *urb)
 {
     struct oddor_gear *shifter = urb->context;
     struct device *dev = &shifter->interface->dev;
-    unsigned char new_gear;
-    unsigned int i;
-    int prev_idx, new_idx;
     int retval;
 
     switch (urb->status) {
@@ -129,38 +217,8 @@ static void oddor_gear_irq(struct urb *urb)
         goto resubmit;
     }
 
-    new_gear = shifter->data[0];  /* Gear position is in byte 0 */
-
-    /* Only process if gear changed */
-    if (new_gear != shifter->current_gear) {
-        /* Release previous gear */
-        prev_idx = oddor_gear_lookup(shifter->current_gear);
-        if (prev_idx >= 0) {
-            input_report_key(shifter->input,
-                             gear_button_map[prev_idx].button_code, 0);
-        } else {
-            /* If previous gear was unknown, release all to be safe */
-            for (i = 0; i < GEAR_MAP_SIZE; i++)
-                input_report_key(shifter->input,
-                                 gear_button_map[i].button_code, 0);
-        }
-
-        /* Press new gear */
-        new_idx = oddor_gear_lookup(new_gear);
-        if (new_idx >= 0) {
-            input_report_key(shifter->input,
-                             gear_button_map[new_idx].button_code, 1);
-            dev_dbg(dev, "%s engaged (0x%02X)\n",
-                    gear_button_map[new_idx].name, new_gear);
-        } else if (new_gear == GEAR_NEUTRAL) {
-            dev_dbg(dev, "Neutral (0x%02X)\n", new_gear);
-        } else {
-            dev_dbg(dev, "Unknown gear code 0x%02X\n", new_gear);
-        }
-
-        shifter->current_gear = new_gear;
-        input_sync(shifter->input);
-    }
+    /* Gear position is in byte 0 */
+    oddor_gear_report_gear(shifter, shifter->data[0]);
 
 resubmit:
     retval = usb_submit_urb(urb, GFP_ATOMIC);
@@ -184,6 +242,7 @@ static int oddor_gear_open(struct input_dev *dev)
 
     /* While suspended, resume() will submit the URB for us. */
     if (shifter->open_count == 0 && !shifter->suspended) {
+        oddor_gear_sync_state(shifter);
         retval = usb_submit_urb(shifter->irq_urb, GFP_KERNEL);
         if (retval)
             goto out;
@@ -201,8 +260,15 @@ static void oddor_gear_close(struct input_dev *dev)
 
     mutex_lock(&shifter->io_mutex);
 
-    if (shifter->open_count > 0 && --shifter->open_count == 0)
+    if (shifter->open_count > 0 && --shifter->open_count == 0) {
         usb_kill_urb(shifter->irq_urb);
+        /*
+         * We stop tracking the lever while closed, so don't leave a stale
+         * gear "pressed"; the next open re-reads the real state.
+         */
+        if (!shifter->device_removed)
+            oddor_gear_report_gear(shifter, GEAR_NEUTRAL);
+    }
 
     mutex_unlock(&shifter->io_mutex);
 }
@@ -376,8 +442,10 @@ static int oddor_gear_resume(struct usb_interface *interface)
 
     mutex_lock(&shifter->io_mutex);
     shifter->suspended = false;
-    if (shifter->open_count > 0 && !shifter->device_removed)
+    if (shifter->open_count > 0 && !shifter->device_removed) {
+        oddor_gear_sync_state(shifter);   /* gear may have moved while asleep */
         retval = usb_submit_urb(shifter->irq_urb, GFP_NOIO);
+    }
     mutex_unlock(&shifter->io_mutex);
 
     return retval;
