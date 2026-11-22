@@ -1,5 +1,8 @@
 # oddor_gear
 
+> [!WARNING]
+> **AI-generated software.** This entire driver, including the kernel module, the build files, the install scripts and this README, was created using only AI. It has been compile-tested and exercised in an emulated USB environment, but it has had no traditional human code review. It runs in kernel space, so a bug can crash or hang your system. Use it at your own risk.
+
 Linux kernel driver for the [ZSC ODDOR H-pattern shifter](https://www.aliexpress.com/item/1005007543763824.html). Translates the shifter's USB HID data into standard joystick button events, making it work in racing simulators like BeamNG.drive under Linux.
 
 ---
@@ -9,8 +12,8 @@ Linux kernel driver for the [ZSC ODDOR H-pattern shifter](https://www.aliexpress
 The driver targets USB device `4785:7353`. If your shifter has a different VID:PID (check with `lsusb`), update the IDs in `oddor_gear.c` before installing:
 
 ```c
-#define ODDOR_VENDOR_ID   0x4785
-#define ODDOR_PRODUCT_ID  0x7353
+#define ODDOR_GEAR_VENDOR_ID  0x4785
+#define ODDOR_GEAR_PRODUCT_ID 0x7353
 ```
 
 ---
@@ -50,7 +53,7 @@ The script will:
 2. Verify the USB device is connected
 3. Copy sources to `/usr/src/` and register with DKMS
 4. Build and load the kernel module
-5. Install a udev rule so the device is accessible without root
+5. Install a udev rule (`/etc/udev/rules.d/70-oddor-gear.rules`) that gives the logged-in user access to the shifter's input device, without root
 
 After installation, **reboot** or run `sudo modprobe oddor_gear` to load the module immediately.
 
@@ -117,6 +120,18 @@ For raw kernel logs:
 ```bash
 dmesg | grep -i oddor | tail -20
 ```
+
+Per-gear messages ("Gear 3 engaged", ...) are debug-level so they don't flood
+the kernel log while driving. To see them, enable dynamic debug:
+```bash
+echo 'module oddor_gear +p' | sudo tee /sys/kernel/debug/dynamic_debug/control
+```
+
+### Module options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `sync_on_open` | `Y` | When a game opens the device, or the system resumes from sleep, ask the shifter for its current gear (HID GET_REPORT). A gear engaged beforehand is then reported immediately instead of after the next shift. If your shifter misbehaves, disable it: `echo N \| sudo tee /sys/module/oddor_gear/parameters/sync_on_open`, or persistently with `options oddor_gear sync_on_open=0` in `/etc/modprobe.d/oddor_gear.conf`. |
 
 ---
 

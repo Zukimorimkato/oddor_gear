@@ -26,7 +26,7 @@ $SUDO_CMD dkms remove -m ${PACKAGE} -v ${VERSION} --all
 $SUDO_CMD rm -rf /usr/src/${PACKAGE}-${VERSION}
 
 # Remove udev rule
-$SUDO_CMD rm -f /etc/udev/rules.d/99-oddor-gear.rules
+$SUDO_CMD rm -f /etc/udev/rules.d/70-oddor-gear.rules /etc/udev/rules.d/99-oddor-gear.rules
 
 # Reload udev
 $SUDO_CMD udevadm control --reload-rules
